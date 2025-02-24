@@ -1,0 +1,9 @@
+# python virtual environment
+venv/
+
+__pycache__/
+*.pyc
+
+# SQLite
+chatbot.db
+.env
