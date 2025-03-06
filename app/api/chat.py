@@ -28,17 +28,24 @@ async def get_sessions(db: Session = Depends(get_db)):
     return [{"id": s.id, "name": s.name, "timestamp": s.timestamp.isoformat()} for s in sessions]
 
 @router.post("/{session_id}", response_model=ChatResponse)
-async def chat(session_id: int, request: ChatRequest, model: str = "blenderbot", db: Session = Depends(get_db)):
+async def chat(session_id: int, request: ChatRequest, model: str = "gemini-1.5-flash", db: Session = Depends(get_db)):
     session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Chat session not found")
+    
+    # Save user message
     user_msg = Message(text=request.message, sender="user", session_id=session_id)
     db.add(user_msg)
     db.commit()
-    ai_response = get_ai_response(request.message, model)
+
+    # Get AI response with session history
+    ai_response = get_ai_response(request.message, model, session_id, db)
+    
+    # Save bot response
     bot_msg = Message(text=ai_response, sender="bot", session_id=session_id)
     db.add(bot_msg)
     db.commit()
+    
     return ChatResponse(response=ai_response)
 
 @router.get("/{session_id}/history")

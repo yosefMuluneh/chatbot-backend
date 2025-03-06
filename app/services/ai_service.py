@@ -2,64 +2,81 @@ import requests
 import logging
 from dotenv import load_dotenv
 import os
+from sqlalchemy.orm import Session
+from app.models.message import Message
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-HF_API_KEY = os.getenv("HF_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MODELS = {
-    "blenderbot": "facebook/blenderbot-400M-distill",  # Light option
-    "blenderbot-smart": "facebook/blenderbot-1B-distill"  # Smart option
+    "gemini-1.5-flash": "gemini-1.5-flash",
+    "gemini-2.0-flash": "gemini-2.0-flash"
 }
 
-def get_ai_response(prompt: str, model_name: str = "blenderbot") -> str:
-    if not HF_API_KEY:
-        logger.warning("API key missing, using fallback")
+
+def get_ai_response(prompt: str, model_name: str = "gemini-1.5-flash", session_id: int = None, db: Session = None) -> str:
+    if not GEMINI_API_KEY:
+        logger.warning("Gemini API key missing, using fallback")
         return "No API key set—can’t chat right now!"
     
     if model_name not in MODELS:
-        logger.warning(f"Invalid model {model_name}, defaulting to blenderbot")
-        model_name = "blenderbot"
+        logger.warning(f"Invalid model {model_name}, defaulting to gemini-1.5-flash")
+        model_name = "gemini-1.5-flash"
     
-    API_URL = f"https://api-inference.huggingface.co/models/{MODELS[model_name]}"
-    HEADERS = {"Authorization": f"Bearer {HF_API_KEY}"}
+    API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODELS[model_name]}:generateContent?key={GEMINI_API_KEY}"
+    HEADERS = {
+        "Content-Type": "application/json"
+    }
+
+    # Build conversation history from the database if session_id and db are provided
+    conversation_history = []
+    if session_id and db:
+        messages = (db.query(Message)
+                    .filter(Message.session_id == session_id)
+                    .order_by(Message.timestamp.asc())
+                    .all())
+        for msg in messages:
+            role = "user" if msg.sender == "user" else "model"
+            conversation_history.append({
+                "role": role,
+                "parts": [{"text": msg.text}]
+            })
+
+    # Add the current user prompt to the history
+    conversation_history.append({
+        "role": "user",
+        "parts": [{"text": prompt}]
+    })
 
     try:
-        # BlenderBot models use "User: ... Bot:" format
-        inputs = f"User: {prompt}\nBot:"
-
         payload = {
-            "inputs": inputs,
-            "parameters": {
-                "max_length": 50,
+            "contents": conversation_history,
+            "generationConfig": {
+                "maxOutputTokens": 500,
                 "temperature": 0.7,
-                "top_k": 50,
-                "top_p": 0.9,
-                "repetition_penalty": 1.2  # Reduce repetition
+                "topP": 0.9,
+                "topK": 50
             }
         }
         response = requests.post(API_URL, headers=HEADERS, json=payload)
         response.raise_for_status()
-        generated_text = response.json()[0]["generated_text"]
-        logger.info(f"Raw {model_name} output: {generated_text}")  # Debug raw response
+        generated_text = response.json()
+        logger.info(f"Raw {model_name} output: {generated_text}")
 
-        # Clean response (same for both BlenderBot models)
-        bot_start = generated_text.find("Bot:") + 4
-        clean_response = generated_text[bot_start:].strip() if bot_start > 3 else generated_text.strip()
+        # Extract the raw response
+        content = generated_text["candidates"][0]["content"]["parts"][0]["text"]
+        
+        # Clean the response: remove Markdown symbols and preserve paragraph structure
+        cleaned_content = content.replace("**", "").replace("*", "").strip()
+        # Split by double newlines to preserve paragraphs, then join with single newlines
+        paragraphs = [p.strip() for p in cleaned_content.split("\n\n") if p.strip()]
+        cleaned_content = "\n".join(paragraphs)
 
-        if not clean_response or clean_response == prompt:
-            return "I’m stumped—try again?"
-
-        prompt_lower = prompt.lower()
-        if prompt_lower in ["hi", "hello", "hey"]:
-            return "Hey there! What’s up?"
-        if "weather" in prompt_lower:
-            return "Can’t check the skies, but I hope it’s clear for you!"
-
-        logger.info(f"Generated {model_name} response for prompt: {prompt}")
-        return clean_response
+        logger.info(f"Generated {model_name} response for prompt: {prompt} in session {session_id}")
+        return cleaned_content
 
     except Exception as e:
-        logger.error(f"API error with {model_name}: {str(e)}")
+        logger.error(f"API error with {model_name} for session {session_id}: {str(e)}")
         return "Oops, something broke—give me a sec to recover!"
